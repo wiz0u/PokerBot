@@ -65,6 +65,7 @@ namespace PokerBot
 				{
 					case "/start": await OnCommandStart(msg, args); return;
 					case "/stop": await OnCommandStop(msg); return;
+					case "/b":
 					case "/relance": await OnCommandRaise(msg, args); return;
 					case "/check": await OnCommandCheck(msg, args); return;
 				}
@@ -133,10 +134,10 @@ namespace PokerBot
 				await Bot.SendTextMessageAsync(ChatId, "Commande valide seulement pendant les enchères");
 			else if (msg.From.Id != CurrentPlayer.User.Id)
 				await Bot.SendTextMessageAsync(ChatId, $"Ce n'est pas votre tour, c'est à {CurrentPlayer.MarkDown()} de parler", ParseMode.Markdown);
-			else if (!int.TryParse(arguments, out int relance) || (relance *= bigBlind) < currentBet + bigBet - CurrentPlayer.Bet)
+			else if (!double.TryParse(arguments, out double relance) || (relance *= bigBlind) < currentBet + bigBet - CurrentPlayer.Bet)
 				await Bot.SendTextMessageAsync(ChatId, $"Vous devez relancer de +{BB(currentBet + bigBet - CurrentPlayer.Bet)} au minimum");
 			else
-				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + relance - currentBet);
+				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + (int)relance - currentBet);
 		}
 
 		private async Task OnCommandCheck(Message _, string arguments)
@@ -290,6 +291,7 @@ namespace PokerBot
 			ShuffleCards();
 			Board.Clear();
 			bettingPlayers = Players.Count;
+			currentPot = 0;
 			foreach (var player in Players)
 			{
 				player.Cards.Clear();
@@ -326,7 +328,7 @@ namespace PokerBot
 				choices.Add(InlineKeyboardButton.WithCallbackData("Parler", "check " + ChatId));
 			else if (CurrentPlayer.CanBet(currentBet))
 				choices.Add(InlineKeyboardButton.WithCallbackData($"Suivre +{BB(currentBet - CurrentPlayer.Bet)}", "call " + ChatId));
-			if (maxBet == -1 || currentBet + bigBet < maxBet && CurrentPlayer.CanBet(currentBet + bigBet))
+			if ((maxBet == -1 || currentBet + bigBet < maxBet) && CurrentPlayer.CanBet(currentBet + bigBet))
 				choices.Add(InlineKeyboardButton.WithCallbackData($"Relance +{BB(currentBet + bigBet - CurrentPlayer.Bet)}", "raise " + ChatId));
 			if (CurrentPlayer.Bet < currentBet)
 				choices.Add(InlineKeyboardButton.WithCallbackData("Passer", "fold " + ChatId));
@@ -389,7 +391,7 @@ namespace PokerBot
 					text += $" La mise est à {BB(currentBet)}\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
 				else if (Board.Count == 5)
 				{
-					text += $" Abattage des cartes !\nBoard:  ";
+					text += $" Abattage des cartes !\nBoard: ";
 					text += string.Join("  ", Board.Select(CardShort));
 					var hands = PlayersInTurn.Select(player => (player, hand:DetermineBestHand(Board.Concat(player.Cards)))).ToList();
 					foreach (var t in hands)
@@ -413,7 +415,7 @@ namespace PokerBot
 				}
 				else
 				{
-					text += $" Le tour d'enchères est terminé. Pot: {BB(pot)}\n{DistributeBoard()}:  ";
+					text += $" Le tour d'enchères est terminé. Pot: {BB(pot)}\n{DistributeBoard()}: ";
 					text += string.Join("  ", Board.Select(CardShort));
 					currentPot = pot;
 					foreach (var player in Players)
