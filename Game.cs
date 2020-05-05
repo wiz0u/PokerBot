@@ -13,15 +13,12 @@ namespace PokerBot
 {
 	class Game
 	{
-		const bool abattageImmediat = false;
 		public readonly long ChatId;
 		private readonly Telegram.Bot.TelegramBotClient Bot;
 		readonly SemaphoreSlim sem = new SemaphoreSlim(1);
 
 		int configTokens = 5000;
-		int smallBlind = 10;
 		int bigBlind = 20;
-		int smallBet = 10;
 		int bigBet = 20;
 		int maxBet = -1;
 
@@ -39,7 +36,9 @@ namespace PokerBot
 		int bettingPlayers;
 		Player CurrentPlayer;
 		Player lastPlayerToRaise;
+#pragma warning disable IDE0052 // Remove unread private members
 		Task runNextTurn;
+#pragma warning restore IDE0052 // Remove unread private members
 
 		private static readonly string[] cardValues = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A" };
 		private static readonly string[] cardDescr = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "Valet", "Dame", "Roi", "As" };
@@ -68,6 +67,7 @@ namespace PokerBot
 					case "/b":
 					case "/relance": await OnCommandRaise(msg, args); return;
 					case "/check": await OnCommandCheck(msg, args); return;
+					case "/stacks": await OnCommandStacks(msg); return;
 				}
 			}
 			finally
@@ -101,10 +101,10 @@ namespace PokerBot
 			}
 			var args = arguments.Split(' ');
 			if (args.Length > 0 && int.TryParse(args[0], out int arg)) configTokens = arg;
-			if (args.Length > 1 && int.TryParse(args[1], out arg)) { bigBet = bigBlind = arg; smallBet = smallBlind = arg / 2; }
+			if (args.Length > 1 && int.TryParse(args[1], out arg)) bigBlind = arg;
 			if (args.Length > 2 && int.TryParse(args[2], out arg))
 			{
-				if (arg / bigBet <= 1 || arg % smallBet != 0)
+				if (arg / bigBlind <= 1 || arg % bigBlind != 0)
 				{
 					await Bot.SendTextMessageAsync(ChatId, "Montant invalide de mise maximale: " + arg);
 					return;
@@ -136,6 +136,8 @@ namespace PokerBot
 				await Bot.SendTextMessageAsync(ChatId, $"Ce n'est pas votre tour, c'est à {CurrentPlayer.MarkDown()} de parler", ParseMode.Markdown);
 			else if (!double.TryParse(arguments, out double relance) || (relance *= bigBlind) < currentBet + bigBet - CurrentPlayer.Bet)
 				await Bot.SendTextMessageAsync(ChatId, $"Vous devez relancer de +{BB(currentBet + bigBet - CurrentPlayer.Bet)} au minimum");
+			else if (!CurrentPlayer.CanBet(CurrentPlayer.Bet + (int)relance))
+				await Bot.SendTextMessageAsync(ChatId, $"Vous n'avez pas assez pour relancer d'autant", ParseMode.Markdown);
 			else
 				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + (int)relance - currentBet);
 		}
@@ -162,9 +164,27 @@ namespace PokerBot
 			}
 		}
 
+		private async Task OnCommandStacks(Message _)
+		{
+			if (status != Status.WaitForBets)
+			{
+				await Bot.SendTextMessageAsync(ChatId, "Pas de partie en cours", ParseMode.Markdown);
+				return;
+			}
+			string text = "Stacks des joueurs :";
+			foreach (var player in Players)
+			{
+				text += $"\n{player.MarkDown()}: {BB(player.Stack)}";
+				if (player.Status == Player.PlayerStatus.Folded)
+					text += " _(couché)_";
+			}
+			text += $"\nPot actuel: {BB(currentPot + Players.Sum(p => p.Bet))}";
+			await Bot.SendTextMessageAsync(ChatId, text, ParseMode.Markdown);
+		}
+
 		private Player FindPlayer(InlineQuery query) => FindPlayer(query.From);
 		private Player FindPlayer(CallbackQuery query) => FindPlayer(query.From);
-		private Player FindPlayer(Message msg) => FindPlayer(msg.From);
+		//private Player FindPlayer(Message msg) => FindPlayer(msg.From);
 
 		private Player FindPlayer(User from)
 		{
@@ -254,7 +274,7 @@ namespace PokerBot
 				if (Players.Count >= 2)
 					replyMarkup.Add(InlineKeyboardButton.WithCallbackData("Commencer la partie", "start " + ChatId));
 			}
-			var text = $"Jetons: {configTokens}, Blinds: {smallBlind},{bigBlind}";
+			var text = $"Jetons: {configTokens}, Big Blind: {bigBlind}";
 			if (maxBet != -1) text += $" max {maxBet}";
 			if (finalize)
 				text = $"La partie commence! {text}\nParticipants: ";
@@ -304,9 +324,10 @@ namespace PokerBot
 				player.Cards.Add(Deck.Dequeue());
 			int smallIdx = (buttonIdx + 1) % Players.Count;
 			int bigIdx = (smallIdx + 1) % Players.Count;
-			Players[smallIdx].SetBet(smallBlind);
+			Players[smallIdx].SetBet(bigBlind/2);
 			Players[bigIdx].SetBet(bigBlind);
 			currentBet = bigBlind;
+			bigBet = bigBlind;
 			CurrentPlayer = Players[(bigIdx + 1) % Players.Count];
 			lastPlayerToRaise = CurrentPlayer;
 			var choices = GetChoices();
@@ -352,7 +373,8 @@ namespace PokerBot
 					break;
 				case CallbackWord.raise2:
 					lastPlayerToRaise = CurrentPlayer;
-					currentBet += customValue;
+					bigBet = customValue;
+					currentBet += bigBet;
 					text += $" *relance de {BB(currentBet - CurrentPlayer.Bet)}* !";
 					CurrentPlayer.SetBet(currentBet);
 					break;
@@ -394,8 +416,8 @@ namespace PokerBot
 					text += $" Abattage des cartes !\nBoard: ";
 					text += string.Join("  ", Board.Select(CardShort));
 					var hands = PlayersInTurn.Select(player => (player, hand:DetermineBestHand(Board.Concat(player.Cards)))).ToList();
-					foreach (var t in hands)
-						text += $"\n{string.Join("  ", t.player.Cards.Select(CardShort))} : {t.hand.descr} pour {t.player}";
+					foreach (var (player, hand) in hands)
+						text += $"\n{string.Join("  ", player.Cards.Select(CardShort))} : {hand.descr} pour {player}";
 					var winners = DetermineWinners(hands);
 					if (winners.Count > 1)
 					{
@@ -421,6 +443,7 @@ namespace PokerBot
 					foreach (var player in Players)
 						player.Bet = 0;
 					currentBet = 0;
+					bigBet = bigBlind;
 					lastPlayerToRaise = null;
 					CurrentPlayer = Players[buttonIdx];
 					NextPlayer();
@@ -442,12 +465,12 @@ namespace PokerBot
 		{
 			var winners = new List<Player>();
 			int winForce = 0;
-			foreach (var t in hands)
+			foreach (var (player, hand) in hands)
 			{
-				if (t.hand.force < winForce) continue;
-				if (t.hand.force > winForce) winners.Clear();
-				winForce = t.hand.force;
-				winners.Add(t.player);
+				if (hand.force < winForce) continue;
+				if (hand.force > winForce) winners.Clear();
+				winForce = hand.force;
+				winners.Add(player);
 			}
 			if (winners.Count == 1)
 				return winners;
