@@ -12,7 +12,7 @@ namespace PokerBot
 		public int Bet;
 		public enum PlayerStatus { DidNotTalk, Betting, Folded };
 		public PlayerStatus Status;
-		public readonly List<int> Cards = new List<int>();
+		public readonly List<Card> Cards = new List<Card>();
 
 		public override string ToString() => User.FirstName;
 		public string MarkDown() => $"[{User.FirstName}](tg://user?id={User.Id})";

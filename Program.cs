@@ -2,13 +2,9 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Telegram.Bot;
-using Telegram.Bot.Args;
 using Telegram.Bot.Types;
-using Telegram.Bot.Types.InlineQueryResults;
-using Telegram.Bot.Types.ReplyMarkups;
 
 #pragma warning disable CA1031
 
@@ -17,26 +13,33 @@ namespace PokerBot
 	internal static class Program
 	{
 		private static TelegramBotClient Bot;
-		private static readonly HashSet<User> knownUsers = new HashSet<User>();
-		public static User my;
+		private static TelegramWrapper Telegram;
+		private static User my;
+		private static readonly Dictionary<long, Game> gamesByChatId = new Dictionary<long, Game>();
+		internal static readonly Dictionary<int, Game> gamesByUserId = new Dictionary<int, Game>();
 
-		#region Infrastructure
+		private static Game GetOrMakeGame(Chat chat)
+			=> gamesByChatId.TryGetValue(chat.Id, out var game) ? game : gamesByChatId[chat.Id] = new Game(Telegram, chat);
+		private static Game GetGame(User user)
+			=> gamesByUserId.TryGetValue(user.Id, out var game) ? game : null;
+		internal static IEnumerable<int> Colors(this IEnumerable<Card> cards) => cards.Select(c => c.Color);
+
 		private static async Task Main(string[] args)
 		{
 			Trace.Listeners.Add(new ConsoleListener());
 			Trace.WriteLine("Starting");
 			Bot = new TelegramBotClient(args[0]);
+			Telegram = new TelegramWrapper(Bot);
 			my = await Bot.GetMeAsync();
-			CheckUser(my);
 			Trace.WriteLine("Bot ready");
 			Bot.OnReceiveError += (s, e) => Trace.TraceError($"ReceiveError {e.ApiRequestException}");
 			Bot.OnReceiveGeneralError += (s, e) => Trace.TraceError($"ReceiveGeneralError {e.Exception}");
-			Bot.OnMessage += (s, e) => _ = DoTask(OnMessage, e.Message);
-			Bot.OnInlineQuery += (s, e) => _ = DoTask(OnInlineQuery, e.InlineQuery);
-			Bot.OnCallbackQuery += (s, e) => _ = DoTask(OnCallbackQuery, e.CallbackQuery);
+			Bot.OnMessage += (s, e) => _ = SafeDoTask(OnMessage, e.Message);
+			Bot.OnInlineQuery += (s, e) => _ = SafeDoTask(OnInlineQuery, e.InlineQuery);
+			Bot.OnCallbackQuery += (s, e) => _ = SafeDoTask(OnCallbackQuery, e.CallbackQuery);
 			await Bot.SetMyCommandsAsync(new[] {
 				new BotCommand { Command = "/start", Description = "Démarrer une partie" },
-				new BotCommand { Command = "/relance", Description = "Relancer d'un montant de votre choix" },
+				new BotCommand { Command = "/b", Description = "Relancer d'un montant de votre choix" },
 			});
 			Bot.StartReceiving();
 			for (; ;)
@@ -45,16 +48,11 @@ namespace PokerBot
 				Trace.WriteLine("SysRequest: " + command);
 				if (command == "exit")
 					break;
-				else if (command == "users")
-				{
-					foreach (var user in knownUsers)
-						Console.WriteLine($"User: {user.FirstName} {user.LastName} (@{user.Username}) #{user.Id} speaks {user.LanguageCode}");
-				}
 			}
 			Trace.WriteLine("Exiting");
 		}
 
-		private static async Task DoTask<T>(Func<T, Task> taskFunc, T e)
+		private static async Task SafeDoTask<T>(Func<T, Task> taskFunc, T e)
 		{
 			try
 			{
@@ -66,40 +64,9 @@ namespace PokerBot
 			}
 		}
 
-		internal static TResult[] SelectToArray<TSource, TResult>(this IReadOnlyList<TSource> source, Func<TSource, TResult> selector)
-		{
-			var result = new TResult[source.Count];
-			for (int i = 0; i < result.Length; ++i)
-				result[i] = selector(source[i]);
-			return result;
-		}
-
-		internal static IEnumerable<int> Colors(this IEnumerable<int> cards) => cards.Select(c => c % 4);
-
-		private static void CheckUser(User user)
-		{
-			if (knownUsers.Add(user))
-				Trace.WriteLine($"User: {user.FirstName} {user.LastName} (@{user.Username}) #{user.Id} speaks {user.LanguageCode}");
-		}
-		#endregion
-
-		private static readonly Dictionary<long, Game> gamesByChatId = new Dictionary<long, Game>();
-		internal static readonly Dictionary<int, Game> gamesByUserId = new Dictionary<int, Game>();
-
-		private static Game GetGame(Chat chat)
-		{
-			if (gamesByChatId.TryGetValue(chat.Id, out var game)) return game;
-			return gamesByChatId[chat.Id] = new Game(Bot, chat.Id);
-		}
-		private static Game GetGame(User user)
-		{
-			return gamesByUserId.TryGetValue(user.Id, out var game) ? game : null;
-		}
-
 		private static async Task OnMessage(Message msg)
 		{
-			CheckUser(msg.From);
-			Console.WriteLine($"{msg.From.Username}> {msg.Text}");
+			Console.WriteLine($"{msg.Chat.Title}>{msg.From.Username}> {msg.Text}");
 			var text = msg.Text;
 			if (string.IsNullOrEmpty(text)) return;
 			if (text.StartsWith("/"))
@@ -114,7 +81,7 @@ namespace PokerBot
 						return; // command not for me => ignored
 					command = command.Remove(argsIndex);
 				}
-				await GetGame(msg.Chat).OnCommand(msg, command.ToLower(), args);
+				await GetOrMakeGame(msg.Chat).OnCommand(msg, command.ToLower(), args);
 			}
 		}
 
@@ -131,10 +98,9 @@ namespace PokerBot
 
 		private static async Task OnInlineQuery(InlineQuery query)
 		{
-			CheckUser(query.From);
 			var game = GetGame(query.From);
 			if (game == null)
-				await Bot.AnswerInlineQueryAsync(query.Id, null);
+				await Telegram.AnswerInline(query);
 			else
 				await game.OnInline(query);
 		}

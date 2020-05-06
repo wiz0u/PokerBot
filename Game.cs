@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot.Types;
@@ -13,48 +13,50 @@ namespace PokerBot
 {
 	class Game
 	{
+		public readonly Chat Chat;
 		public readonly long ChatId;
-		private readonly Telegram.Bot.TelegramBotClient Bot;
+		private readonly TelegramWrapper Telegram;
 		readonly SemaphoreSlim sem = new SemaphoreSlim(1);
 
-		int configTokens = 5000;
-		int bigBlind = 20;
-		int bigBet = 20;
-		int maxBet = -1;
+		// game config:
+		int InitialTokens = 5000;
+		int BigBlind = 20;
+		int MaxBet = -1; // default: No Limit
 
+		// game status:
 		enum Status { Inactive, CollectParticipants, WaitForBets };
 		Status status;
-		Message inscriptionMsg, lastMsg;
-		string lastMsgText;
 		readonly List<Player> Players = new List<Player>();
 		IEnumerable<Player> PlayersInTurn => Players.Where(p => p.Status != Player.PlayerStatus.Folded);
-		readonly List<int> Board = new List<int>();
-		Queue<int> Deck;
-		int buttonIdx;
-		int currentBet;
-		int currentPot;
-		int bettingPlayers;
+		readonly List<Card> Board = new List<Card>();
+		Queue<Card> Deck;
+		int ButtonIdx;
+		int BigBet;
+		int CurrentBet;
+		int CurrentPot;
 		Player CurrentPlayer;
-		Player lastPlayerToRaise;
+		Player LastPlayerToRaise;
+
 #pragma warning disable IDE0052 // Remove unread private members
+		Message inscriptionMsg, lastMsg;
+		string lastMsgText;
 		Task runNextTurn;
 #pragma warning restore IDE0052 // Remove unread private members
 
-		private static readonly string[] cardValues = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A" };
-		private static readonly string[] cardDescr = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "Valet", "Dame", "Roi", "As" };
-		private static readonly string[] handDescr = new string[13] { "au 2", "au 3", "au 4", "au 5", "au 6", "au 7", "au 8", "au 9", "au 10", "au Valet", "à la Dame", "au Roi", "à l'As" };
-		private static readonly string[] handDescrs = new string[13] { "aux 2", "aux 3", "aux 4", "aux 5", "aux 6", "aux 7", "aux 8", "aux 9", "aux 10", "aux Valets", "aux Dames", "aux Rois", "aux As" };
-		private static readonly string[] colorEmoji = new string[4] { "♣️", "♦️", "♥️", "♠️" };
-		private static readonly string[] colorDescr = new string[4] { "trèfle", "carreau", "cœur", "pique" };
-		private static string CardShort(int card) => $"{cardValues[card / 4]}{colorEmoji[card % 4]}";
-		private static string CardFull(int card) => $"{cardDescr[card / 4]} de {colorDescr[card % 4]}";
+		private string BB(int montant) => montant % BigBlind == 0 ? $"{montant / BigBlind} BB" : $"{(double)montant / BigBlind:N1} BB";
+		private Player FindPlayer(User from) => from.Id == CurrentPlayer?.User.Id ? CurrentPlayer : Players.Find(player => player.User.Id == from.Id);
+		private Player FindPlayer(InlineQuery query) => FindPlayer(query.From);
+		private Player FindPlayer(CallbackQuery query) => FindPlayer(query.From);
+		//private Player FindPlayer(Message msg) => FindPlayer(msg.From);
 
-		public Game(Telegram.Bot.TelegramBotClient bot, long id)
+		public Game(TelegramWrapper telegram, Chat chat)
 		{
-			Bot = bot;
-			ChatId = id;
+			Telegram = telegram;
+			Chat = chat;
+			ChatId = chat.Id;
 		}
 
+		// point d'entrée pour les commandes 'slash'
 		public async Task OnCommand(Message msg, string cmd, string args)
 		{
 			await sem.WaitAsync();
@@ -82,7 +84,7 @@ namespace PokerBot
 			{
 				case ChatType.Channel:
 				case ChatType.Private:
-					await Bot.SendTextMessageAsync(ChatId, "Utilisez /start dans un groupe pour démarrer une partie");
+					await Telegram.SendMsg(Chat, "Utilisez /start dans un groupe pour démarrer une partie");
 					return;
 			}
 			switch (status)
@@ -96,21 +98,22 @@ namespace PokerBot
 					inscriptionMsg = null;
 					break;
 				case Status.WaitForBets:
-					await Bot.SendTextMessageAsync(ChatId, "Une partie est déjà en cours avec " + string.Join(", ", Players));
+					await Telegram.SendMsg(Chat, "Une partie est déjà en cours avec " + string.Join(", ", Players));
 					return;
 			}
 			var args = arguments.Split(' ');
-			if (args.Length > 0 && int.TryParse(args[0], out int arg)) configTokens = arg;
-			if (args.Length > 1 && int.TryParse(args[1], out arg)) bigBlind = arg;
+			if (args.Length > 0 && int.TryParse(args[0], out int arg)) InitialTokens = arg;
+			if (args.Length > 1 && int.TryParse(args[1], out arg)) BigBlind = arg;
 			if (args.Length > 2 && int.TryParse(args[2], out arg))
 			{
-				if (arg / bigBlind <= 1 || arg % bigBlind != 0)
+				if (arg / BigBlind <= 1 || arg % BigBlind != 0)
 				{
-					await Bot.SendTextMessageAsync(ChatId, "Montant invalide de mise maximale: " + arg);
+					await Telegram.SendMsg(Chat, "Montant invalide de mise maximale: " + arg);
 					return;
 				}
-				maxBet = arg;
+				MaxBet = arg;
 			}
+			Trace.TraceInformation($"Ouverture de la partie sur {Chat.Title}");
 			await DoCollectParticipants();
 		}
 
@@ -118,7 +121,7 @@ namespace PokerBot
 		{
 			if (status != Status.Inactive)
 			{
-				await Bot.SendTextMessageAsync(ChatId, "Fin de la partie");
+				await Telegram.SendMsg(Chat, "Fin de la partie");
 				status = Status.Inactive;
 			}
 			foreach (var player in Players)
@@ -131,44 +134,36 @@ namespace PokerBot
 		private async Task OnCommandRaise(Message msg, string arguments)
 		{
 			if (status != Status.WaitForBets)
-				await Bot.SendTextMessageAsync(ChatId, "Commande valide seulement pendant les enchères");
+				await Telegram.SendMsg(Chat, "Commande valide seulement pendant les enchères");
 			else if (msg.From.Id != CurrentPlayer.User.Id)
-				await Bot.SendTextMessageAsync(ChatId, $"Ce n'est pas votre tour, c'est à {CurrentPlayer.MarkDown()} de parler", ParseMode.Markdown);
-			else if (!double.TryParse(arguments, out double relance) || (relance *= bigBlind) < currentBet + bigBet - CurrentPlayer.Bet)
-				await Bot.SendTextMessageAsync(ChatId, $"Vous devez relancer de +{BB(currentBet + bigBet - CurrentPlayer.Bet)} au minimum");
+				await Telegram.SendMsg(Chat, $"Ce n'est pas votre tour, c'est à {CurrentPlayer.MarkDown()} de parler");
+			else if (!double.TryParse(arguments, out double relance) || (relance *= BigBlind) < CurrentBet + BigBet - CurrentPlayer.Bet)
+				await Telegram.SendMsg(Chat, $"Vous devez relancer de +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)} au minimum");
 			else if (!CurrentPlayer.CanBet(CurrentPlayer.Bet + (int)relance))
-				await Bot.SendTextMessageAsync(ChatId, $"Vous n'avez pas assez pour relancer d'autant", ParseMode.Markdown);
+				await Telegram.SendMsg(Chat, $"Vous n'avez pas assez pour relancer d'autant");
 			else
-				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + (int)relance - currentBet);
+				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + (int)relance - CurrentBet);
 		}
 
 		private async Task OnCommandCheck(Message _, string arguments)
 		{
-			var cards = arguments.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Select(ParseCard).ToList();
-			if (cards.IndexOf(-1) >= 0)
+			var cards = arguments.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Select(Card.Parse).ToList();
+			if (cards.IndexOf(Card.Invalid) >= 0)
 			{
-				await Bot.SendTextMessageAsync(ChatId, "Carte non reconnue:\n"+string.Join("\n", cards.Select(c => c < 0 ? "???" : CardFull(c))));
+				await Telegram.SendMsg(Chat, "Carte non reconnue:\n" + string.Join("\n", cards.Select(c => c.ToFullString())));
 				return;
 			}
-			var (force, descr) = DetermineBestHand(cards);
-			var secondary = DetermineSecondary(cards);
+			var (force, descr) = Card.BestHand(cards);
+			var secondary = Card.CardsForce(cards);
 
-			await Bot.SendTextMessageAsync(ChatId, $"Meilleure main: {descr} (force {force}, {secondary})");
-
-			static int ParseCard(string s)
-			{
-				var couleur = Array.IndexOf(colorEmoji, s.Substring(s.Length-2));
-				var rang = Array.IndexOf(cardValues, s.Remove(s.Length - 2));
-				if (couleur == -1 || rang == -1) return -1;
-				return couleur + rang * 4;
-			}
+			await Telegram.SendMsg(Chat, $"Meilleure main: {descr} (force {force}, {secondary})");
 		}
 
 		private async Task OnCommandStacks(Message _)
 		{
 			if (status != Status.WaitForBets)
 			{
-				await Bot.SendTextMessageAsync(ChatId, "Pas de partie en cours", ParseMode.Markdown);
+				await Telegram.SendMsg(Chat, "Pas de partie en cours");
 				return;
 			}
 			string text = "Stacks des joueurs :";
@@ -178,20 +173,43 @@ namespace PokerBot
 				if (player.Status == Player.PlayerStatus.Folded)
 					text += " _(couché)_";
 			}
-			text += $"\nPot actuel: {BB(currentPot + Players.Sum(p => p.Bet))}";
-			await Bot.SendTextMessageAsync(ChatId, text, ParseMode.Markdown);
+			text += $"\nPot actuel: {BB(CurrentPot + Players.Sum(p => p.Bet))}";
+			await Telegram.SendMsg(Chat, text);
 		}
 
-		private Player FindPlayer(InlineQuery query) => FindPlayer(query.From);
-		private Player FindPlayer(CallbackQuery query) => FindPlayer(query.From);
-		//private Player FindPlayer(Message msg) => FindPlayer(msg.From);
-
-		private Player FindPlayer(User from)
+		// point d'entrée pour la complétion inline
+		public async Task OnInline(InlineQuery query)
 		{
-			if (from.Id == CurrentPlayer?.User.Id) return CurrentPlayer;
-			return Players.Find(player => player.User.Id == from.Id);
+			await sem.WaitAsync();
+			try
+			{
+				string expr = query.Query;
+				var player = FindPlayer(query);
+				if (player == null)
+				{
+					await Telegram.AnswerInline(query);
+					return;
+				}
+				string descr = null;
+				if (Board.Count >= 3)
+					descr = "Votre main: " + Card.BestHand(Board.Concat(player.Cards)).descr;
+				await Telegram.AnswerInline(query,
+					new[] {
+						new InlineQueryResultArticle($"Card_"+string.Join("_", player.Cards),
+							"Vos cartes:  " + string.Join("  ", player.Cards),
+							new InputTextMessageContent("(je regarde mes cartes)"))
+						{ Description = descr },//, ThumbUrl = "https://raw.githubusercontent.com/hayeah/playing-cards-assets/master/png/2_of_hearts.png", ThumbWidth = 222, ThumbHeight = 323 },
+					  //new InlineQueryResultPhoto("2", $"http://via.placeholder.com/{expr}", $"http://via.placeholder.com/{expr}") { Title = "photo", PhotoWidth = 85, PhotoHeight = 85 },
+					},
+					2, isPersonal: true, switchPmText: $"Mise: {BB(player.Bet)} | Stack: {BB(player.Stack)}", switchPmParameter: "cards");
+			}
+			finally
+			{
+				sem.Release();
+			}
 		}
 
+		// point d'entrée pour les boutons sous mes messages
 		enum CallbackWord { join = 0, start = 1, call = 2, raise = 3, raise2 = 4, fold = 5, check = 6 };
 		public async Task OnCallback(CallbackQuery query, string[] words)
 		{
@@ -203,21 +221,21 @@ namespace PokerBot
 				switch (status)
 				{
 					case Status.Inactive:
-						await Bot.AnswerCallbackQueryAsync(query.Id, "Pas de partie en cours. Tapez /start pour commencer");
+						await Telegram.AnswerCallback(query, "Pas de partie en cours. Tapez /start pour commencer");
 						return;
 					case Status.CollectParticipants:
 						if (callback >= CallbackWord.call)
 						{
-							await Bot.AnswerCallbackQueryAsync(query.Id, "Commande invalide");
+							await Telegram.AnswerCallback(query, "Commande invalide");
 							return;
 						}
 						break;
 					case Status.WaitForBets:
 						if (callback >= CallbackWord.call) break;
 						if (player == null)
-							await Bot.AnswerCallbackQueryAsync(query.Id, "La partie est déjà en cours. Attendez qu'elle finisse...");
+							await Telegram.AnswerCallback(query, "La partie est déjà en cours. Attendez qu'elle finisse...");
 						else
-							await Bot.AnswerCallbackQueryAsync(query.Id);
+							await Telegram.AnswerCallback(query);
 						return;
 				}
 				switch (callback)
@@ -230,16 +248,16 @@ namespace PokerBot
 					case CallbackWord.fold:
 					case CallbackWord.check:
 						if (player == null)
-							await Bot.AnswerCallbackQueryAsync(query.Id, "Vous ne jouez pas dans cette partie !");
+							await Telegram.AnswerCallback(query, "Vous ne jouez pas dans cette partie !");
 						else if (CurrentPlayer.User.Id != query.From.Id)
-							await Bot.AnswerCallbackQueryAsync(query.Id, "Ce n'est pas votre tour de jouer !");
+							await Telegram.AnswerCallback(query, "Ce n'est pas votre tour de jouer !");
 						else
 						{
-							await Bot.AnswerCallbackQueryAsync(query.Id);
+							await Telegram.AnswerCallback(query);
 							await DoChoice(callback);
 						}
 						break;
-					default: await Bot.AnswerCallbackQueryAsync(query.Id, "Commande inconnue"); break;
+					default: await Telegram.AnswerCallback(query, "Commande inconnue"); break;
 				}
 			}
 			finally
@@ -253,14 +271,17 @@ namespace PokerBot
 			var player = FindPlayer(query);
 			if (player != null)
 			{
+#if DEBUG
 				Players.Add(new Player { User = new User { Id = query.From.Id, FirstName = query.From.FirstName + (Players.Count + 1), Username = query.From.Username } });
-				//await Bot.AnswerCallbackQueryAsync(query.Id, "Vous êtes déjà inscrit !");
-				//return;
+#else
+				await Bot.AnswerCallback(query, "Vous êtes déjà inscrit !");
+				return;
+#endif
 			}
 			else
 				Players.Add(new Player { User = query.From });
 			Program.gamesByUserId[query.From.Id] = this;
-			await Bot.AnswerCallbackQueryAsync(query.Id, "Vous êtes inscrit");
+			await Telegram.AnswerCallback(query, "Vous êtes inscrit");
 			await DoCollectParticipants();
 		}
 
@@ -274,44 +295,54 @@ namespace PokerBot
 				if (Players.Count >= 2)
 					replyMarkup.Add(InlineKeyboardButton.WithCallbackData("Commencer la partie", "start " + ChatId));
 			}
-			var text = $"Jetons: {configTokens}, Big Blind: {bigBlind}";
-			if (maxBet != -1) text += $" max {maxBet}";
+			var text = $"Jetons: {InitialTokens}, Big Blind: {BigBlind}";
+			if (MaxBet != -1) text += $" max {MaxBet}";
 			if (finalize)
 				text = $"La partie commence! {text}\nParticipants: ";
 			else
 				text = $"La partie va commencer... {text}\nQui participe ? ";
 			text += string.Join(", ", Players.Select(player => player.MarkDown()));
 			if (inscriptionMsg == null)
-				inscriptionMsg = await Bot.SendTextMessageAsync(ChatId, text, ParseMode.Markdown,
-					replyMarkup: new InlineKeyboardMarkup(replyMarkup));
+				inscriptionMsg = await Telegram.SendMsg(Chat, text, new InlineKeyboardMarkup(replyMarkup));
 			else
-				await Bot.EditMessageTextAsync(inscriptionMsg.Chat, inscriptionMsg.MessageId, text, ParseMode.Markdown,
-					replyMarkup: replyMarkup.ToArray());
+				await Telegram.EditMsg(inscriptionMsg, text, replyMarkup.ToArray());
 		}
 
 		private async Task DoStart(CallbackQuery query)
 		{
 			if (FindPlayer(query) == null)
 			{
-				await Bot.AnswerCallbackQueryAsync(query.Id, "Seul un joueur inscrit peut lancer la partie");
+				await Telegram.AnswerCallback(query, "Seul un joueur inscrit peut lancer la partie");
 				return;
 			}
-			await Bot.AnswerCallbackQueryAsync(query.Id, "C'est parti !");
+			Trace.TraceInformation($"Lancement de la partie sur {Chat.Title} avec {string.Join(", ", Players)}");
+			await Telegram.AnswerCallback(query, "C'est parti !");
 			await DoCollectParticipants(true);
 			status = Status.WaitForBets;
 			foreach (var player in Players)
-				player.Stack = configTokens;
-			buttonIdx = Players.Count - 1;
+				player.Stack = InitialTokens;
+			ButtonIdx = Players.Count - 1;
 
 			await StartTurn();
+		}
+
+		private void ShuffleCards() // Knuth algorithm
+		{
+			var rand = new Random();
+			var cards = Enumerable.Range(0, 52).Select(i => new Card(i)).ToArray();
+			for (int i = 0; i < 52; i++)
+			{
+				int j = rand.Next(i, cards.Length);
+				Card temp = cards[i]; cards[i] = cards[j]; cards[j] = temp; // swap cards i&j
+			}
+			Deck = new Queue<Card>(cards);
 		}
 
 		private async Task StartTurn()
 		{
 			ShuffleCards();
 			Board.Clear();
-			bettingPlayers = Players.Count;
-			currentPot = 0;
+			CurrentPot = 0;
 			foreach (var player in Players)
 			{
 				player.Cards.Clear();
@@ -322,38 +353,36 @@ namespace PokerBot
 				player.Cards.Add(Deck.Dequeue());
 			foreach (var player in Players)
 				player.Cards.Add(Deck.Dequeue());
-			int smallIdx = (buttonIdx + 1) % Players.Count;
+			int smallIdx = (ButtonIdx + 1) % Players.Count;
 			int bigIdx = (smallIdx + 1) % Players.Count;
-			Players[smallIdx].SetBet(bigBlind/2);
-			Players[bigIdx].SetBet(bigBlind);
-			currentBet = bigBlind;
-			bigBet = bigBlind;
+			Players[smallIdx].SetBet(BigBlind/2);
+			Players[bigIdx].SetBet(BigBlind);
+			CurrentBet = BigBlind;
+			BigBet = BigBlind;
 			CurrentPlayer = Players[(bigIdx + 1) % Players.Count];
-			lastPlayerToRaise = CurrentPlayer;
-			var choices = GetChoices();
-			lastMsg = await Bot.SendTextMessageAsync(ChatId,
+			LastPlayerToRaise = CurrentPlayer;
+			lastMsg = await Telegram.SendMsg(Chat,
 				lastMsgText = "Nouveau tour, nouvelles cartes!\n" +
 				$"{Players[smallIdx]}: petite blind. {Players[bigIdx]}: grosse blind.\n" +
 				$"C'est à {CurrentPlayer.MarkDown()} de parler",
-				ParseMode.Markdown,
-				replyMarkup: new InlineKeyboardMarkup(new IEnumerable<InlineKeyboardButton>[] {
-					choices,
-					new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes", "") },
-			}));
+				GetChoices());
 		}
 
-		private List<InlineKeyboardButton> GetChoices()
+		private InlineKeyboardMarkup GetChoices()
 		{
 			var choices = new List<InlineKeyboardButton>();
-			if (CurrentPlayer.Bet == currentBet)
+			if (CurrentPlayer.Bet == CurrentBet)
 				choices.Add(InlineKeyboardButton.WithCallbackData("Parler", "check " + ChatId));
-			else if (CurrentPlayer.CanBet(currentBet))
-				choices.Add(InlineKeyboardButton.WithCallbackData($"Suivre +{BB(currentBet - CurrentPlayer.Bet)}", "call " + ChatId));
-			if ((maxBet == -1 || currentBet + bigBet < maxBet) && CurrentPlayer.CanBet(currentBet + bigBet))
-				choices.Add(InlineKeyboardButton.WithCallbackData($"Relance +{BB(currentBet + bigBet - CurrentPlayer.Bet)}", "raise " + ChatId));
-			if (CurrentPlayer.Bet < currentBet)
+			else if (CurrentPlayer.CanBet(CurrentBet))
+				choices.Add(InlineKeyboardButton.WithCallbackData($"Suivre +{BB(CurrentBet - CurrentPlayer.Bet)}", "call " + ChatId));
+			if ((MaxBet == -1 || CurrentBet + BigBet < MaxBet) && CurrentPlayer.CanBet(CurrentBet + BigBet))
+				choices.Add(InlineKeyboardButton.WithCallbackData($"Relance +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)}", "raise " + ChatId));
+			if (CurrentPlayer.Bet < CurrentBet)
 				choices.Add(InlineKeyboardButton.WithCallbackData("Passer", "fold " + ChatId));
-			return choices;
+			return new InlineKeyboardMarkup(new IEnumerable<InlineKeyboardButton>[] {
+				choices,
+				new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes", "") },
+			});
 		}
 
 		private async Task DoChoice(CallbackWord choice, int customValue = 0)
@@ -363,23 +392,22 @@ namespace PokerBot
 			{
 				case CallbackWord.call:
 					text += " *suit*.";
-					CurrentPlayer.SetBet(currentBet);
+					CurrentPlayer.SetBet(CurrentBet);
 					break;
 				case CallbackWord.raise:
-					lastPlayerToRaise = CurrentPlayer;
-					currentBet += bigBet;
-					text += $" *relance de {BB(currentBet - CurrentPlayer.Bet)}* !";
-					CurrentPlayer.SetBet(currentBet);
+					LastPlayerToRaise = CurrentPlayer;
+					CurrentBet += BigBet;
+					text += $" *relance de {BB(CurrentBet - CurrentPlayer.Bet)}* !";
+					CurrentPlayer.SetBet(CurrentBet);
 					break;
 				case CallbackWord.raise2:
-					lastPlayerToRaise = CurrentPlayer;
-					bigBet = customValue;
-					currentBet += bigBet;
-					text += $" *relance de {BB(currentBet - CurrentPlayer.Bet)}* !";
-					CurrentPlayer.SetBet(currentBet);
+					LastPlayerToRaise = CurrentPlayer;
+					BigBet = customValue;
+					CurrentBet += BigBet;
+					text += $" *relance de {BB(CurrentBet - CurrentPlayer.Bet)}* !";
+					CurrentPlayer.SetBet(CurrentBet);
 					break;
 				case CallbackWord.fold:
-					bettingPlayers--;
 					text += " *passe*.";
 					CurrentPlayer.Status = Player.PlayerStatus.Folded;
 					break;
@@ -390,34 +418,33 @@ namespace PokerBot
 					break;
 			}
 			await RemoveLastMessageButtons();
-			var pot = currentPot + Players.Sum(p => p.Bet);
-			if (bettingPlayers == 1)
+			var pot = CurrentPot + Players.Sum(p => p.Bet);
+			if (PlayersInTurn.Count() == 1)
 			{
 				var winner = PlayersInTurn.Single();
 				winner.Stack += pot;
 				foreach (var player in Players)
 					player.Bet = 0;
-				await Bot.SendTextMessageAsync(ChatId,
-					$"{text}\n{winner.MarkDown()} remporte le pot de {BB(pot)}",
-					ParseMode.Markdown);
-				buttonIdx = (buttonIdx + 1) % Players.Count;
+				await Telegram.SendMsg(Chat, $"{text}\n{winner.MarkDown()} remporte le pot de {BB(pot)}");
+				ButtonIdx = (ButtonIdx + 1) % Players.Count;
 				runNextTurn = Task.Delay(5000).ContinueWith(_ => StartTurn());
 			}
 			else
 			{
+				Trace.TraceInformation($"Pot sur {Chat.Title}: {CurrentPot} + {string.Join(" ", Players.Select(p => $"{p}:{p.Bet}"))}");
 				var stillBetting = NextPlayer();
-#if false //abattageImmediat
+#if ABATTAGE_IMMEDIAT
 				DistributeBoard(); DistributeBoard(); DistributeBoard(); stillBetting = false;
 #endif
 				if (stillBetting)
-					text += $" La mise est à {BB(currentBet)}\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
+					text += $" La mise est à {BB(CurrentBet)}\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
 				else if (Board.Count == 5)
 				{
 					text += $" Abattage des cartes !\nBoard: ";
-					text += string.Join("  ", Board.Select(CardShort));
-					var hands = PlayersInTurn.Select(player => (player, hand:DetermineBestHand(Board.Concat(player.Cards)))).ToList();
+					text += string.Join("  ", Board);
+					var hands = PlayersInTurn.Select(player => (player, hand: Card.BestHand(Board.Concat(player.Cards)))).ToList();
 					foreach (var (player, hand) in hands)
-						text += $"\n{string.Join("  ", player.Cards.Select(CardShort))} : {hand.descr} pour {player}";
+						text += $"\n{string.Join("  ", player.Cards)} : {hand.descr} pour {player}";
 					var winners = DetermineWinners(hands);
 					if (winners.Count > 1)
 					{
@@ -430,34 +457,27 @@ namespace PokerBot
 						text += $"\n{winners[0].MarkDown()} remporte le pot de {BB(pot)} !";
 						winners[0].Stack += pot;
 					}
-					await Bot.SendTextMessageAsync(ChatId, text, ParseMode.Markdown);
-					buttonIdx = (buttonIdx + 1) % Players.Count;
+					await Telegram.SendMsg(Chat, text);
+					ButtonIdx = (ButtonIdx + 1) % Players.Count;
 					runNextTurn = Task.Delay(5000).ContinueWith(_ => StartTurn());
 					return;
 				}
 				else
 				{
 					text += $" Le tour d'enchères est terminé. Pot: {BB(pot)}\n{DistributeBoard()}: ";
-					text += string.Join("  ", Board.Select(CardShort));
-					currentPot = pot;
+					text += string.Join("  ", Board);
+					CurrentPot = pot;
 					foreach (var player in Players)
 						player.Bet = 0;
-					currentBet = 0;
-					bigBet = bigBlind;
-					lastPlayerToRaise = null;
-					CurrentPlayer = Players[buttonIdx];
+					CurrentBet = 0;
+					BigBet = BigBlind;
+					LastPlayerToRaise = null;
+					CurrentPlayer = Players[ButtonIdx];
 					NextPlayer();
-					lastPlayerToRaise = CurrentPlayer;
+					LastPlayerToRaise = CurrentPlayer;
 					text += $"\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
 				}
-				var choices = GetChoices();
-				lastMsg = await Bot.SendTextMessageAsync(ChatId,
-					lastMsgText = text,
-					ParseMode.Markdown,
-					replyMarkup: new InlineKeyboardMarkup(new IEnumerable<InlineKeyboardButton>[] {
-						choices,
-						new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes", "") },
-					}));
+				lastMsg = await Telegram.SendMsg(Chat, lastMsgText = text, GetChoices());
 			}
 		}
 
@@ -478,74 +498,13 @@ namespace PokerBot
 			winForce = 0;
 			foreach (var player in winners)
 			{
-				var force = DetermineSecondary(Board.Concat(player.Cards));
+				var force = Card.CardsForce(Board.Concat(player.Cards));
 				if (force < winForce) continue;
 				if (force > winForce) winners2.Clear();
 				winForce = force;
 				winners2.Add(player);
 			}
 			return winners2;
-		}
-
-		private (int force, string descr) DetermineBestHand(IEnumerable<int> cards)
-		{
-			var lookup = cards.ToLookup(c => c / 4);
-			int suite = 0;
-			for (int i = 12; i >= 4; --i)
-			{
-				if (lookup[i].Any() && lookup[i - 1].Any() && lookup[i - 2].Any() && lookup[i - 3].Any() && lookup[i - 4].Any())
-				{
-					suite = i;
-					break;
-				}
-			}
-			if (suite == 0 && lookup[3].Any() && lookup[2].Any() && lookup[1].Any() && lookup[0].Any() && lookup[12].Any())
-				suite = 3; // suite au 4
-			if (suite != 0)
-			{
-				bool flush = lookup[suite].Colors()
-					.Intersect(lookup[suite - 1].Colors())
-					.Intersect(lookup[suite - 2].Colors())
-					.Intersect(lookup[suite - 3].Colors())
-					.Intersect(lookup[(suite + 9) % 13].Colors())
-					.Any();
-				if (flush)
-					return suite == 12 ? (80014, "quinte flush royale") : (80002 + suite, "quinte flush " + handDescr[suite]);
-			}
-			var orderedLookup = lookup.OrderByDescending(g => g.Key).ToList();
-			var carre = orderedLookup.Find(g => g.Count() == 4)?.Key;
-			if (carre.HasValue) return (70002 + carre.Value, "carré " + handDescrs[carre.Value]);
-			var brelan = orderedLookup.Find(g => g.Count() == 3)?.Key;
-			var paires = orderedLookup.Where(g => g.Count() == 2).ToList();
-			if (brelan.HasValue && paires.Count > 0)
-				return (60202 + brelan.Value * 100 + paires[0].Key, "full " + handDescrs[brelan.Value] + " et " + handDescr[paires[0].Key]);
-			var couleur = cards.ToLookup(c => c % 4).Where(g => g.Count() >= 5).ToList();
-			if (couleur.Count > 0)
-			{
-				var rangCouleur = couleur.SelectMany(g => g).Max() / 4;
-				return (50002 + rangCouleur, "couleur " + handDescr[rangCouleur]);
-			}
-			if (suite != 0)
-				return (40002 + suite, "suite " + handDescr[suite]);
-			if (brelan.HasValue)
-				return (30002 + brelan.Value, "brelan " + handDescrs[brelan.Value]);
-			if (paires.Count >= 2)
-			{
-				int p1 = paires[0].Key, p2 = paires[1].Key;
-				return (20202 + p1 * 100 + p2, "double paire " + handDescrs[p1] + " et " + handDescrs[p2]);
-			}
-			if (paires.Count == 1)
-				return (10002 + paires[0].Key, "paire " + handDescrs[paires[0].Key]);
-			var rang = orderedLookup[0].Key;
-			return (2 + rang, cardDescr[rang]);
-		}
-
-		private int DetermineSecondary(IEnumerable<int> cards)
-		{
-			int force = 0;
-			foreach (var card in cards.Select(c => c / 4 + 2).OrderByDescending(c => c).Take(5))
-				force = force * 100 + card;
-			return force;
 		}
 
 		static readonly string[] BoardNames = new[] { "Flop", "Turn", "River" };
@@ -564,7 +523,7 @@ namespace PokerBot
 		private async Task RemoveLastMessageButtons()
 		{
 			if (lastMsg == null) return;
-			await Bot.EditMessageTextAsync(lastMsg.Chat, lastMsg.MessageId, lastMsgText, ParseMode.Markdown, replyMarkup: null);
+			await Telegram.EditMsg(lastMsg, lastMsgText);
 		}
 
 		private bool NextPlayer()
@@ -574,63 +533,9 @@ namespace PokerBot
 			{
 				currentIndex = (currentIndex + 1) % Players.Count;
 				CurrentPlayer = Players[currentIndex];
-				if (CurrentPlayer == lastPlayerToRaise) return false;
+				if (CurrentPlayer == LastPlayerToRaise) return false;
 			} while (CurrentPlayer.Status == Player.PlayerStatus.Folded);
 			return true;
-		}
-
-		private void ShuffleCards()
-		{
-			var cards = new int[52];
-			var rand = new Random();
-			// Knuth algorithm
-			for (int i = 0; i < 52; i++)
-				cards[i] = i;
-			for (int i = 0; i < 52; i++)
-			{
-				int j = rand.Next(i, cards.Length); // Don't select from the entire array on subsequent loops
-				int temp = cards[i]; cards[i] = cards[j]; cards[j] = temp;
-			}
-			Deck = new Queue<int>(cards);
-		}
-
-		public async Task OnInline(InlineQuery query)
-		{
-			await sem.WaitAsync();
-			try
-			{
-				string expr = query.Query;
-				var player = FindPlayer(query);
-				if (player == null)
-				{
-					await Bot.AnswerInlineQueryAsync(query.Id, null);
-					return;
-				}
-				string descr = null;
-				if (Board.Count >= 3)
-					descr = "Votre main: " + DetermineBestHand(Board.Concat(player.Cards)).descr;
-				await Bot.AnswerInlineQueryAsync(query.Id,
-					new[] {
-						new InlineQueryResultArticle($"Card_"+string.Join("_", player.Cards),
-							"Vos cartes:  " + string.Join("  ", player.Cards.Select(CardShort)),
-							new InputTextMessageContent("(je regarde mes cartes)"))
-						{ Description = descr },//, ThumbUrl = "https://raw.githubusercontent.com/hayeah/playing-cards-assets/master/png/2_of_hearts.png", ThumbWidth = 222, ThumbHeight = 323 },
-					  //new InlineQueryResultPhoto("2", $"http://via.placeholder.com/{expr}", $"http://via.placeholder.com/{expr}") { Title = "photo", PhotoWidth = 85, PhotoHeight = 85 },
-					},
-					5, isPersonal: true, switchPmText: $"Mise: {BB(player.Bet)} | Stack: {BB(player.Stack)}", switchPmParameter: "cards");
-			}
-			finally
-			{
-				sem.Release();
-			}
-		}
-
-		private string BB(int montant)
-		{
-			if (montant % bigBlind == 0)
-				return $"{montant / bigBlind} BB";
-			else
-				return $"{(double)montant / bigBlind:N1} BB";
 		}
 	}
 }
