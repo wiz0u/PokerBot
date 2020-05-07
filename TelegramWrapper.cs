@@ -19,7 +19,7 @@ namespace PokerBot
 
 		public Task<Message> SendMsg(Chat chat, string text, IReplyMarkup replyMarkup = null)
 		{
-			Console.WriteLine($"{chat.Title}< {text.Replace("\n", " ")}");
+			Console.WriteLine($"{chat.Title}< {text.Replace("\n", " | ")}");
 			return Bot.SendTextMessageAsync(chat.Id, text, ParseMode.Markdown, replyMarkup: replyMarkup);
 		}
 

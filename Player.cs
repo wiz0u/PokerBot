@@ -8,8 +8,8 @@ namespace PokerBot
 	class Player
 	{
 		public User User;
-		public int Stack;
-		public int Bet;
+		public int Stack;	// jetons restants
+		public int Bet;		// mise totale actuelle sur cette manche
 		public enum PlayerStatus { DidNotTalk, Betting, Folded };
 		public PlayerStatus Status;
 		public readonly List<Card> Cards = new List<Card>();

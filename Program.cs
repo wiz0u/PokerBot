@@ -26,6 +26,7 @@ namespace PokerBot
 
 		private static async Task Main(string[] args)
 		{
+			Console.OutputEncoding = System.Text.Encoding.UTF8;
 			Trace.Listeners.Add(new ConsoleListener());
 			Trace.WriteLine("Starting");
 			Bot = new TelegramBotClient(args[0]);
@@ -44,7 +45,7 @@ namespace PokerBot
 			Bot.StartReceiving();
 			for (; ;)
 			{
-				var command = Console.ReadLine().ToLower();
+				var command = Console.ReadLine()?.ToLower();
 				Trace.WriteLine("SysRequest: " + command);
 				if (command == "exit")
 					break;

@@ -30,10 +30,10 @@ namespace PokerBot
 		IEnumerable<Player> PlayersInTurn => Players.Where(p => p.Status != Player.PlayerStatus.Folded);
 		readonly List<Card> Board = new List<Card>();
 		Queue<Card> Deck;
-		int ButtonIdx;
-		int BigBet;
-		int CurrentBet;
-		int CurrentPot;
+		int ButtonIdx;			// index du joueur ayant le bouton
+		int BigBet;				// taille de la relance mini
+		int StartingBet;		// niveau de mise au debut de ce tour d'enchères
+		int CurrentBet;			// niveau de mise actuelle
 		Player CurrentPlayer;
 		Player LastPlayerToRaise;
 
@@ -173,7 +173,7 @@ namespace PokerBot
 				if (player.Status == Player.PlayerStatus.Folded)
 					text += " _(couché)_";
 			}
-			text += $"\nPot actuel: {BB(CurrentPot + Players.Sum(p => p.Bet))}";
+			text += $"\nPot actuel: {BB(Players.Sum(p => p.Bet))}";
 			await Telegram.SendMsg(Chat, text);
 		}
 
@@ -342,7 +342,7 @@ namespace PokerBot
 		{
 			ShuffleCards();
 			Board.Clear();
-			CurrentPot = 0;
+			StartingBet = 0;
 			foreach (var player in Players)
 			{
 				player.Cards.Clear();
@@ -360,12 +360,20 @@ namespace PokerBot
 			CurrentBet = BigBlind;
 			BigBet = BigBlind;
 			CurrentPlayer = Players[(bigIdx + 1) % Players.Count];
+			TraceStatus();
 			LastPlayerToRaise = CurrentPlayer;
 			lastMsg = await Telegram.SendMsg(Chat,
 				lastMsgText = "Nouveau tour, nouvelles cartes!\n" +
 				$"{Players[smallIdx]}: petite blind. {Players[bigIdx]}: grosse blind.\n" +
 				$"C'est à {CurrentPlayer.MarkDown()} de parler",
 				GetChoices());
+		}
+
+		private void TraceStatus()
+		{
+			Trace.TraceInformation($"Mises sur {Chat.Title}: " +
+				string.Join(" ", Players.Select(p => $"{(p == CurrentPlayer ? "»" : "")}{p}:{p.Bet}")) +
+				$" | mise:{CurrentBet} +{BigBet}");
 		}
 
 		private InlineKeyboardMarkup GetChoices()
@@ -381,7 +389,7 @@ namespace PokerBot
 				choices.Add(InlineKeyboardButton.WithCallbackData("Passer", "fold " + ChatId));
 			return new InlineKeyboardMarkup(new IEnumerable<InlineKeyboardButton>[] {
 				choices,
-				new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes", "") },
+				new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes et jetons", "") },
 			});
 		}
 
@@ -418,7 +426,7 @@ namespace PokerBot
 					break;
 			}
 			await RemoveLastMessageButtons();
-			var pot = CurrentPot + Players.Sum(p => p.Bet);
+			var pot = Players.Sum(p => p.Bet);
 			if (PlayersInTurn.Count() == 1)
 			{
 				var winner = PlayersInTurn.Single();
@@ -427,17 +435,19 @@ namespace PokerBot
 					player.Bet = 0;
 				await Telegram.SendMsg(Chat, $"{text}\n{winner.MarkDown()} remporte le pot de {BB(pot)}");
 				ButtonIdx = (ButtonIdx + 1) % Players.Count;
-				runNextTurn = Task.Delay(5000).ContinueWith(_ => StartTurn());
+				runNextTurn = Task.Delay(7000).ContinueWith(_ => StartTurn());
 			}
 			else
 			{
-				Trace.TraceInformation($"Pot sur {Chat.Title}: {CurrentPot} + {string.Join(" ", Players.Select(p => $"{p}:{p.Bet}"))}");
 				var stillBetting = NextPlayer();
 #if ABATTAGE_IMMEDIAT
 				DistributeBoard(); DistributeBoard(); DistributeBoard(); stillBetting = false;
 #endif
 				if (stillBetting)
-					text += $" La mise est à {BB(CurrentBet)}\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
+				{
+					text += $" La mise est à {BB(CurrentBet - StartingBet)}\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
+					lastMsg = await Telegram.SendMsg(Chat, lastMsgText = text, GetChoices());
+				}
 				else if (Board.Count == 5)
 				{
 					text += $" Abattage des cartes !\nBoard: ";
@@ -459,25 +469,22 @@ namespace PokerBot
 					}
 					await Telegram.SendMsg(Chat, text);
 					ButtonIdx = (ButtonIdx + 1) % Players.Count;
-					runNextTurn = Task.Delay(5000).ContinueWith(_ => StartTurn());
-					return;
+					runNextTurn = Task.Delay(10000).ContinueWith(_ => StartTurn());
 				}
 				else
 				{
 					text += $" Le tour d'enchères est terminé. Pot: {BB(pot)}\n{DistributeBoard()}: ";
 					text += string.Join("  ", Board);
-					CurrentPot = pot;
-					foreach (var player in Players)
-						player.Bet = 0;
-					CurrentBet = 0;
+					StartingBet = CurrentBet;
 					BigBet = BigBlind;
 					LastPlayerToRaise = null;
 					CurrentPlayer = Players[ButtonIdx];
 					NextPlayer();
 					LastPlayerToRaise = CurrentPlayer;
 					text += $"\nC'est au tour de {CurrentPlayer.MarkDown()} de parler";
+					lastMsg = await Telegram.SendMsg(Chat, lastMsgText = text, GetChoices());
 				}
-				lastMsg = await Telegram.SendMsg(Chat, lastMsgText = text, GetChoices());
+				TraceStatus();
 			}
 		}
 
