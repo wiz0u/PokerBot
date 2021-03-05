@@ -12,6 +12,7 @@ namespace PokerBot
 		private readonly int _value;
 
 		private static readonly string[] ShortNames = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A" };
+//		private static readonly string[] ShortNames = new string[13] { "２", "３", "４", "５", "６", "７", "８", "９", "10", "Ｊ", "Ｑ", "Ｋ", "Ａ" };
 		private static readonly string[] FullNames = new string[13] { "2", "3", "4", "5", "6", "7", "8", "9", "10", "Valet", "Dame", "Roi", "As" };
 		private static readonly string[] HandQualifier_au = new string[13] { "au 2", "au 3", "au 4", "au 5", "au 6", "au 7", "au 8", "au 9", "au 10", "au Valet", "à la Dame", "au Roi", "à l'As" };
 		private static readonly string[] HandQualifier_aux = new string[13] { "aux 2", "aux 3", "aux 4", "aux 5", "aux 6", "aux 7", "aux 8", "aux 9", "aux 10", "aux Valets", "aux Dames", "aux Rois", "aux As" };
@@ -34,6 +35,11 @@ namespace PokerBot
 			str = str.TrimEnd('\xFE0F');
 			var couleur = Array.IndexOf(ColorEmojis, str.Substring(str.Length - 1));
 			var rang = Array.IndexOf(ShortNames, str.Remove(str.Length - 1));
+			if (rang == -1)
+			{
+				if (!int.TryParse(str.Remove(str.Length - 1), out rang) || rang < 2 || rang > 10)
+					rang = -1;
+			}
 			if (couleur == -1 || rang == -1) return Invalid;
 			return new Card(couleur + rang * 4);
 		}

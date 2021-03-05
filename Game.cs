@@ -66,7 +66,7 @@ namespace PokerBot
 				{
 					case "/start": await OnCommandStart(msg, args); return;
 					case "/stop": await OnCommandStop(msg); return;
-					case "/b":
+					case "/b": case "/allin":
 					case "/relance": await OnCommandRaise(msg, args); return;
 					case "/check": await OnCommandCheck(msg, args); return;
 					case "/stacks": await OnCommandStacks(msg); return;
@@ -137,12 +137,29 @@ namespace PokerBot
 				await Telegram.SendMsg(Chat, "Commande valide seulement pendant les enchères");
 			else if (msg.From.Id != CurrentPlayer.User.Id)
 				await Telegram.SendMsg(Chat, $"Ce n'est pas votre tour, c'est à {CurrentPlayer.MarkDown()} de parler");
-			else if (!double.TryParse(arguments, out double relance) || (relance *= BigBlind) < CurrentBet + BigBet - CurrentPlayer.Bet)
-				await Telegram.SendMsg(Chat, $"Vous devez relancer de +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)} au minimum");
-			else if (!CurrentPlayer.CanBet(CurrentPlayer.Bet + (int)relance))
-				await Telegram.SendMsg(Chat, $"Vous n'avez pas assez pour relancer d'autant");
 			else
-				await DoChoice(CallbackWord.raise2, CurrentPlayer.Bet + (int)relance - CurrentBet);
+			{
+				if (!msg.Text.StartsWith("/allin"))
+					await DoChoice(CallbackWord.allin);
+				else
+				{
+					if (!double.TryParse(arguments, out double relanceBB))
+						await Telegram.SendMsg(Chat, "Montant de relance invalide");
+					else
+					{
+						int relance = (int)(relanceBB * BigBlind);
+						if (relance < CurrentBet + BigBet - CurrentPlayer.Bet)
+							await Telegram.SendMsg(Chat, $"Vous devez relancer de +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)} au minimum");
+						else if (!CurrentPlayer.CanBet(CurrentPlayer.Bet + relance))
+							await Telegram.SendMsg(Chat, "Vous n'avez pas assez pour relancer d'autant");
+						else
+						{
+							BigBet = CurrentPlayer.Bet + relance - CurrentBet;
+							await DoChoice(CallbackWord.raise);
+						}
+					}
+				}
+			}
 		}
 
 		private async Task OnCommandCheck(Message _, string arguments)
@@ -210,7 +227,7 @@ namespace PokerBot
 		}
 
 		// point d'entrée pour les boutons sous mes messages
-		enum CallbackWord { join = 0, start = 1, call = 2, raise = 3, raise2 = 4, fold = 5, check = 6 };
+		enum CallbackWord { join = 0, start = 1, call = 2, raise = 3, allin = 4, fold = 5, check = 6 };
 		public async Task OnCallback(CallbackQuery query, string[] words)
 		{
 			await sem.WaitAsync();
@@ -242,11 +259,7 @@ namespace PokerBot
 				{
 					case CallbackWord.join: await DoJoin(query); break;
 					case CallbackWord.start: await DoStart(query); break;
-					case CallbackWord.call:
-					case CallbackWord.raise:
-					case CallbackWord.raise2:
-					case CallbackWord.fold:
-					case CallbackWord.check:
+					default:
 						if (player == null)
 							await Telegram.AnswerCallback(query, "Vous ne jouez pas dans cette partie !");
 						else if (CurrentPlayer.User.Id != query.From.Id)
@@ -257,7 +270,6 @@ namespace PokerBot
 							await DoChoice(callback);
 						}
 						break;
-					default: await Telegram.AnswerCallback(query, "Commande inconnue"); break;
 				}
 			}
 			finally
@@ -383,17 +395,22 @@ namespace PokerBot
 				choices.Add(InlineKeyboardButton.WithCallbackData("Parler", "check " + ChatId));
 			else if (CurrentPlayer.CanBet(CurrentBet))
 				choices.Add(InlineKeyboardButton.WithCallbackData($"Suivre +{BB(CurrentBet - CurrentPlayer.Bet)}", "call " + ChatId));
-			if ((MaxBet == -1 || CurrentBet + BigBet < MaxBet) && CurrentPlayer.CanBet(CurrentBet + BigBet))
-				choices.Add(InlineKeyboardButton.WithCallbackData($"Relance +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)}", "raise " + ChatId));
+
+			if (!CurrentPlayer.CanBet(CurrentBet + BigBet + 1))
+				choices.Add(InlineKeyboardButton.WithCallbackData("All in", "allin " + ChatId));
+			else if (MaxBet == -1 || CurrentBet + BigBet < MaxBet)
+					choices.Add(InlineKeyboardButton.WithCallbackData($"Relance +{BB(CurrentBet + BigBet - CurrentPlayer.Bet)}", "raise " + ChatId));
+
 			if (CurrentPlayer.Bet < CurrentBet)
 				choices.Add(InlineKeyboardButton.WithCallbackData("Passer", "fold " + ChatId));
+
 			return new InlineKeyboardMarkup(new IEnumerable<InlineKeyboardButton>[] {
 				choices,
 				new[] { InlineKeyboardButton.WithSwitchInlineQueryCurrentChat("Voir mes cartes et jetons", "") },
 			});
 		}
 
-		private async Task DoChoice(CallbackWord choice, int customValue = 0)
+		private async Task DoChoice(CallbackWord choice)
 		{
 			string text = CurrentPlayer.ToString();
 			switch (choice)
@@ -408,12 +425,16 @@ namespace PokerBot
 					text += $" *relance de {BB(CurrentBet - CurrentPlayer.Bet)}* !";
 					CurrentPlayer.SetBet(CurrentBet);
 					break;
-				case CallbackWord.raise2:
-					LastPlayerToRaise = CurrentPlayer;
-					BigBet = customValue;
-					CurrentBet += BigBet;
-					text += $" *relance de {BB(CurrentBet - CurrentPlayer.Bet)}* !";
-					CurrentPlayer.SetBet(CurrentBet);
+				case CallbackWord.allin:
+					int playerBet = CurrentPlayer.Bet + CurrentPlayer.Stack;
+					//todo
+					if (playerBet > CurrentBet)
+					{
+						LastPlayerToRaise = CurrentPlayer;
+						CurrentBet = playerBet;
+					}
+					text += $" *allin de {BB(CurrentBet - CurrentPlayer.Bet)}* !";
+					CurrentPlayer.SetBet(playerBet);
 					break;
 				case CallbackWord.fold:
 					text += " *passe*.";

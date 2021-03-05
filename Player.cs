@@ -12,6 +12,7 @@ namespace PokerBot
 		public int Bet;		// mise totale actuelle sur cette manche
 		public enum PlayerStatus { DidNotTalk, Betting, Folded };
 		public PlayerStatus Status;
+		public bool Allin => Stack == 0;
 		public readonly List<Card> Cards = new List<Card>();
 
 		public override string ToString() => User.FirstName;
